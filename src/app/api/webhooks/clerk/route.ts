@@ -7,13 +7,13 @@ import { Webhook } from "svix";
 import { createUser, deleteUser, updateUser } from "@/lib/actions/user.actions";
 
 export async function POST(req: Request) {
-  // You can find this in the Clerk Dashboard -> Webhooks -> choose the webhook
+  // Get the webhook secret from environment variables
   const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
   if (!WEBHOOK_SECRET) {
-    throw new Error(
-      "Please add WEBHOOK_SECRET from Clerk Dashboard to .env or .env.local"
-    );
+    return new Response("Please add WEBHOOK_SECRET to .env or .env.local", {
+      status: 500,
+    });
   }
 
   // Get the headers
@@ -22,18 +22,16 @@ export async function POST(req: Request) {
   const svix_timestamp = headerPayload.get("svix-timestamp");
   const svix_signature = headerPayload.get("svix-signature");
 
-  // If there are no headers, error out
+  // If headers are missing, return an error
   if (!svix_id || !svix_timestamp || !svix_signature) {
-    return new Response("Error occured -- no svix headers", {
-      status: 400,
-    });
+    return new Response("Missing Svix headers", { status: 400 });
   }
 
-  // Get the body
+  // Get the body of the request
   const payload = await req.json();
   const body = JSON.stringify(payload);
 
-  // Create a new Svix instance with your secret.
+  // Create a new Svix instance with your secret
   const wh = new Webhook(WEBHOOK_SECRET);
 
   let evt: WebhookEvent;
@@ -47,69 +45,94 @@ export async function POST(req: Request) {
     }) as WebhookEvent;
   } catch (err) {
     console.error("Error verifying webhook:", err);
-    return new Response("Error occured", {
-      status: 400,
-    });
+    return new Response("Webhook verification failed", { status: 400 });
   }
 
-  // Get the ID and type
+  // Extract ID and event type
   const { id } = evt.data;
   const eventType = evt.type;
 
-  // CREATE
+  // CREATE event handling
   if (eventType === "user.created") {
-    const { id, email_addresses, image_url, first_name, last_name, username } =
+    const { email_addresses, image_url, first_name, last_name, username } =
       evt.data;
+
+    if (!email_addresses || !username) {
+      return new Response("Required fields missing", { status: 400 });
+    }
+
+    if (!id) {
+      throw new Error("Clerk ID is missing");
+    }
 
     const user = {
       clerkId: id,
-      email: email_addresses[0]?.email_address ?? "", // Ensure email exists
-      username: username ?? "", // Ensure username exists
-      firstName: first_name ?? "",
-      lastName: last_name ?? "",
+      email: email_addresses[0].email_address,
+      username: username!,
+      firstName: first_name || "", // Default to empty string if null
+      lastName: last_name || "", // Default to empty string if null
       photo: image_url,
     };
+    try {
+      const newUser = await createUser(user);
 
-    const newUser = await createUser(user);
+      // Set public metadata
+      if (newUser) {
+        const client = await clerkClient(); // Await the clerkClient() to get the ClerkClient instance
+        await client.users.updateUserMetadata(id, {
+          publicMetadata: {
+            userId: newUser._id,
+          },
+        });
 
-    // Set public metadata
-    await (
-      await clerkClient()
-    ).users.updateUserMetadata(id, {
-      publicMetadata: {
-        userId: newUser._id,
-      },
-    });
-
-    return NextResponse.json({ message: "OK", user: newUser });
+        return NextResponse.json({ message: "OK", user: newUser });
+      }
+    } catch (error) {
+      console.error("Error creating user:", error);
+      return new Response("Failed to create user", { status: 500 });
+    }
   }
 
-  // UPDATE
+  // UPDATE event handling
   if (eventType === "user.updated") {
-    const { id, image_url, first_name, last_name, username } = evt.data;
+    const { image_url, first_name, last_name, username } = evt.data;
+
+    if (!id) {
+      return new Response("User ID missing", { status: 400 });
+    }
 
     const user = {
-      firstName: first_name,
-      lastName: last_name,
-      username: username!,
+      firstName: first_name ?? "",
+      lastName: last_name ?? "",
+      username: username ?? "",
       photo: image_url,
     };
 
-    const updatedUser = await updateUser(id, user);
-
-    return NextResponse.json({ message: "OK", user: updatedUser });
+    try {
+      const updatedUser = await updateUser(id, user);
+      return NextResponse.json({ message: "OK", user: updatedUser });
+    } catch (error) {
+      console.error("Error updating user:", error);
+      return new Response("Failed to update user", { status: 500 });
+    }
   }
 
-  // DELETE
+  // DELETE event handling
   if (eventType === "user.deleted") {
-    const { id } = evt.data;
+    if (!id) {
+      return new Response("User ID missing", { status: 400 });
+    }
 
-    const deletedUser = await deleteUser(id!);
-
-    return NextResponse.json({ message: "OK", user: deletedUser });
+    try {
+      const deletedUser = await deleteUser(id);
+      return NextResponse.json({ message: "OK", user: deletedUser });
+    } catch (error) {
+      console.error("Error deleting user:", error);
+      return new Response("Failed to delete user", { status: 500 });
+    }
   }
 
-  console.log(`Webhook with and ID of ${id} and type of ${eventType}`);
+  console.log(`Webhook with ID ${id} and type ${eventType}`);
   console.log("Webhook body:", body);
 
   return new Response("", { status: 200 });
