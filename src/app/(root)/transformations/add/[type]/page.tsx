@@ -1,7 +1,7 @@
-import React from "react";
-
+import Header from "@/components/shared/Header";
 const AddTransformationTypePage = () => {
-  return <div>page</div>;
+  return (
+    <Header title="Transformation Title" subtitle="Transformation Subtitle" />
+  );
 };
-
 export default AddTransformationTypePage;
